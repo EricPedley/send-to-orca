@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Send to Orca Slicer (Onshape)",
+  "version": "0.1.1",
+  "description": "One click: export the current Onshape Part Studio as STEP and open it in OrcaSlicer running on this computer. No server, no API keys.",
+  "host_permissions": [
+    "https://cad.onshape.com/*",
+    "http://127.0.0.1:17890/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://cad.onshape.com/*"],
+      "js": ["export-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://cad.onshape.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

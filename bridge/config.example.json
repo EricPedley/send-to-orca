@@ -1,0 +1,4 @@
+{
+  "comment": "Optional. Pin the exact slicer command orca_bridge launches. Delete this file to use auto-detection (PATH -> AppImage -> flatpak).",
+  "command": "orca-slicer"
+}
