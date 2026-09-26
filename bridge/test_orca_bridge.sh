@@ -58,6 +58,22 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS "http://127.0.0.1:$PORT
   -H "Access-Control-Request-Method: POST")
 [ "$CODE" = 204 ] || fail "extension origin rejected (got $CODE)"
 
+# 6b. configured slicer missing from PATH -> health ok:false, send 500 with error
+ORCA_BRIDGE_CMD="no-such-slicer-xyz" python3 "$HERE/orca_bridge.py" --port $((PORT+1)) >/dev/null &
+B2=$!
+# 6c. slicer found but unexecutable (bad interpreter) -> send 500, not a dropped connection
+BAD_CMD="$(mktemp)"
+printf '#!/nonexistent/interpreter\n' >"$BAD_CMD"; chmod +x "$BAD_CMD"
+ORCA_BRIDGE_CMD="$BAD_CMD" python3 "$HERE/orca_bridge.py" --port $((PORT+2)) >/dev/null &
+B3=$!
+sleep 0.8
+curl -s "http://127.0.0.1:$((PORT+1))/health" | grep -q '"ok":false' || { kill $B2 $B3; fail "health ok with missing slicer"; }
+R2=$(curl -s -w ' %{http_code}' -X POST "http://127.0.0.1:$((PORT+1))/send" --data-binary @"$STEP")
+R3=$(curl -s -w ' %{http_code}' -X POST "http://127.0.0.1:$((PORT+2))/send" --data-binary @"$STEP")
+kill $B2 $B3; rm -f "$BAD_CMD"
+[[ "$R2" == *'"ok":false'*' 500' ]] || fail "missing slicer send: $R2"
+[[ "$R3" == *'cannot start slicer'*' 500' ]] || fail "spawn failure send: $R3"
+
 # 7. AppImage discovery in a known base dir (fake HOME)
 FAKE_HOME=$(mktemp -d)
 mkdir -p "$FAKE_HOME/Applications"

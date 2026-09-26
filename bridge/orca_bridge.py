@@ -133,7 +133,13 @@ def resolve_cmd() -> list[str] | None:
                 cand = None
     if cand:
         parts = shlex.split(cand)
-        parts[0] = shutil.which(parts[0]) or parts[0]
+        exe = shutil.which(parts[0])
+        if not exe:
+            # A bare name missing from the daemon's PATH (e.g. ~/bin added after
+            # the service started) must fail loudly, not at spawn time.
+            print(f"configured slicer not runnable: {parts[0]!r}", flush=True)
+            return None
+        parts[0] = exe
         return parts
     for name in ORCA_NAMES:
         p = shutil.which(name)
@@ -186,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             cmd = resolve_cmd()
             self._json(200, json.dumps(
-                {"ok": True, "slicer": cmd[0] if cmd else None},
+                {"ok": cmd is not None, "slicer": cmd[0] if cmd else None},
                 separators=(",", ":")).encode(), origin or "*")
         else:
             self._json(404, b'{"ok":false,"error":"not found"}', origin or "*")
@@ -228,8 +234,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         out = Path(tempfile.gettempdir()) / f"onshape_{time.strftime('%Y%m%d_%H%M%S')}.step"
         out.write_bytes(data)
-        subprocess.Popen(cmd + [str(out)], start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.Popen(cmd + [str(out)], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            print(f"slicer spawn failed: {cmd[0]}: {e}", flush=True)
+            self._json(500, json.dumps({"ok": False, "error": f"cannot start slicer {cmd[0]}: {e}"},
+                                       separators=(",", ":")).encode(), allow)
+            return
         self._json(200, json.dumps({"ok": True, "file": str(out), "cmd": cmd[0]},
                                    separators=(",", ":")).encode(), allow)
 
