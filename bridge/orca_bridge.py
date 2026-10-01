@@ -20,6 +20,7 @@ Usage: python3 orca_bridge.py [--check] [--port N]
 """
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 DEFAULT_PORT = 17890
 MAX_BODY = 512 * 1024 * 1024
@@ -156,6 +158,19 @@ def resolve_cmd() -> list[str] | None:
     return None
 
 
+BATCH_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _batch_dir(batch: str) -> Path:
+    return Path(tempfile.gettempdir()) / f"orca_bridge_{batch}"
+
+
+def _safe_name(name: str) -> str:
+    """Part name -> filename stem (Orca names the object after the file)."""
+    stem = re.sub(r"[^\w .()+-]", "_", name).strip(" .")[:80] or "part"
+    return stem + ".step"
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -197,6 +212,61 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, b'{"ok":false,"error":"not found"}', origin or "*")
 
+    def _stage(self, url, allow: str) -> None:
+        q = parse_qs(url.query)
+        batch = (q.get("batch") or [""])[0]
+        name = (q.get("name") or ["part"])[0]
+        if not BATCH_RE.match(batch):
+            self._json(400, b'{"ok":false,"error":"bad batch id"}', allow)
+            return
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            n = 0
+        if n <= 0 or n > MAX_BODY:
+            self._json(400, b'{"ok":false,"error":"bad Content-Length"}', allow)
+            return
+        data = self.rfile.read(n)
+        if b"ISO-10303-21" not in data[:1024]:
+            self._json(400, b'{"ok":false,"error":"body is not a STEP file"}', allow)
+            return
+        d = _batch_dir(batch)
+        d.mkdir(exist_ok=True)
+        out = d / _safe_name(name)
+        k = 2
+        while out.exists():  # duplicate part names stay separate objects
+            out = d / _safe_name(name).replace(".step", f" ({k}).step")
+            k += 1
+        out.write_bytes(data)
+        self._json(200, json.dumps({"ok": True, "file": out.name},
+                                   separators=(",", ":")).encode(), allow)
+
+    def _launch(self, url, allow: str) -> None:
+        batch = (parse_qs(url.query).get("batch") or [""])[0]
+        if not BATCH_RE.match(batch):
+            self._json(400, b'{"ok":false,"error":"bad batch id"}', allow)
+            return
+        files = sorted(_batch_dir(batch).glob("*.step"))
+        if not files:
+            self._json(400, b'{"ok":false,"error":"no staged files"}', allow)
+            return
+        cmd = resolve_cmd()
+        if not cmd:
+            self._json(500, b'{"ok":false,"error":"no slicer binary found in PATH '
+                            b'(set ORCA_BRIDGE_CMD or ~/.config/orca-bridge/config.json)"}',
+                       allow)
+            return
+        try:
+            subprocess.Popen(cmd + [str(f) for f in files], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            print(f"slicer spawn failed: {cmd[0]}: {e}", flush=True)
+            self._json(500, json.dumps({"ok": False, "error": f"cannot start slicer {cmd[0]}: {e}"},
+                                       separators=(",", ":")).encode(), allow)
+            return
+        self._json(200, json.dumps({"ok": True, "count": len(files), "cmd": cmd[0]},
+                                   separators=(",", ":")).encode(), allow)
+
     def do_POST(self):
         origin = self.headers.get("Origin", "")
         if origin and not _origin_ok(origin):
@@ -211,6 +281,13 @@ class Handler(BaseHTTPRequestHandler):
             if 0 < n <= 4 * 1024 * 1024:
                 print("DUMP " + self.rfile.read(n).decode("utf-8", "replace"), flush=True)
             self._json(200, b'{"ok":true}', allow)
+            return
+        url = urlparse(self.path)
+        if url.path == "/stage":  # one part of a multi-part send
+            self._stage(url, allow)
+            return
+        if url.path == "/launch":
+            self._launch(url, allow)
             return
         if self.path != "/send":
             self._json(404, b'{"ok":false,"error":"not found"}', allow)

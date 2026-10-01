@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+dist/
+result.json
+.amo-upload-uuid

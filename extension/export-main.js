@@ -90,11 +90,12 @@
     return { documentId: did, workspaceId: wid, elementId: eid };
   }
 
-  async function startTranslation(ctx) {
+  async function startTranslation(ctx, partId) {
     const body = {
       formatName: "STEP", storeInDocument: false,
       flattenAssemblies: true, triggerAutoDownload: false,
     };
+    if (partId) body.partIds = partId;
     const url = `${API}/partstudios/d/${ctx.documentId}/w/${ctx.workspaceId}/e/${ctx.elementId}/translations`;
     let r = await fetch(url, {
       method: "POST", credentials: "include", headers: authHeaders(),
@@ -132,23 +133,54 @@
     throw new Error("export timed out");
   }
 
-  async function doExport() {
+  function requireContext() {
     const ctx = getContext();
     if (!ctx || !ctx.documentId || !ctx.workspaceId || !ctx.elementId)
       throw new Error("open a Part Studio tab first");
-    const tid = await startTranslation(ctx);
+    return ctx;
+  }
+
+  // Parts of the current Part Studio: [{partId, name}]. Empty for assemblies.
+  async function listParts() {
+    const ctx = requireContext();
+    const r = await fetch(
+      `${API}/parts/d/${ctx.documentId}/w/${ctx.workspaceId}/e/${ctx.elementId}`,
+      { credentials: "include", headers: authHeaders() });
+    if (!r.ok) throw new Error("part list HTTP " + r.status);
+    return (await r.json()).map((p) => ({ partId: p.partId, name: p.name || p.partId }));
+  }
+
+  async function doExport(partId) {
+    const ctx = requireContext();
+    const tid = await startTranslation(ctx, partId);
     const url = await pollTranslation(tid, ctx);
     const res = await fetch(url, { credentials: "include", headers: authHeaders() });
     if (!res.ok) throw new Error("STEP download HTTP " + res.status);
     return await res.arrayBuffer();
   }
 
-  window.addEventListener("orca-export-request", async () => {
+  // Event details cross the page/content-script boundary as JSON strings
+  // (Firefox blocks object details from the isolated world).
+  window.addEventListener("orca-parts-request", async () => {
+    let ok = true, parts = [], error = null;
+    try { parts = await listParts(); }
+    catch (e) { ok = false; error = String(e && e.message || e); }
+    window.dispatchEvent(new CustomEvent("orca-parts-result", {
+      detail: JSON.stringify({ ok, parts, error }),
+    }));
+  });
+
+  window.addEventListener("orca-export-request", async (ev) => {
     let ok = true, data = null, error = null;
-    try { data = await doExport(); }
+    let partId = "", id = "";
+    try {
+      const req = JSON.parse(ev.detail || "{}");
+      partId = req.partId || ""; id = req.id || "";
+    } catch (e) {}
+    try { data = await doExport(partId); }
     catch (e) { ok = false; error = String(e && e.message || e); }
     window.dispatchEvent(new CustomEvent("orca-export-result", {
-      detail: { ok, data, error, reqs: window.__osReq.slice(0, 25) },
+      detail: { id, ok, data, error, reqs: window.__osReq.slice(0, 25) },
     }));
   });
 
